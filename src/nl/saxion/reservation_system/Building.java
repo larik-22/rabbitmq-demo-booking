@@ -1,22 +1,65 @@
 package nl.saxion.reservation_system;
 
-import com.rabbitmq.client.Channel;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.rabbitmq.client.*;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Timer;
+import java.util.TimerTask;
+import java.util.concurrent.TimeoutException;
 
 public class Building {
+    private Channel channel;
+    public static final long HEARTBEAT_INTERVAL = 1000;
+    private static final String RENTAL_AGENT_EXCHANGE = "building_to_rental_agent";
+    private final String heartbeatRoutingKey = "building_heartbeat";
+    private final String heartbeatExchange = "building_heartbeat_exchange";
+
     private final String name;
     private final HashMap<String, Boolean> conferenceRooms;
-    public static final long HEARTBEAT_INTERVAL = 5000;
+    private final HashMap<String, String> reservations = new HashMap<>();
 
-    public static void main(String[] args) {
-        new Building(java.util.UUID.randomUUID().toString().substring(0, 8)).run();
+    public static void main(String[] args) throws IOException, TimeoutException {
+        new Building("Building " + java.util.UUID.randomUUID().toString().substring(0, 8)).run();
     }
 
     public Building(String name) {
         this.name = name;
         this.conferenceRooms = generateRandomRooms(3);
+    }
+
+    public void run() throws IOException, TimeoutException {
+        connectToRabbitMQ();
+    }
+
+    public void connectToRabbitMQ() throws IOException, TimeoutException {
+        ConnectionFactory factory = new ConnectionFactory();
+        Connection connection = factory.newConnection();
+        this.channel = connection.createChannel();
+
+//        // Declare exchange for sending room availability
+//        channel.exchangeDeclare(RENTAL_AGENT_EXCHANGE, BuiltinExchangeType.DIRECT);
+//
+//        // Listening for requests from rental agents (using a fanout exchange)
+//        String requestQueue = "building_request_queue_" + name;
+//        channel.queueDeclare(requestQueue, false, false, false, null);
+//        channel.queueBind(requestQueue, "rental_agent_to_building", "");
+//
+//        DeliverCallback deliverCallback = (consumerTag, delivery) -> {
+//            String message = new String(delivery.getBody(), "UTF-8");
+//            System.out.println(" [x] Building received: '" + message + "'");
+//        };
+//
+//        channel.basicConsume(requestQueue, true, deliverCallback, consumerTag -> {});
+        sendHeartbeat(channel);
+    }
+
+    public void sendHeartbeat(Channel channel) {
+        Timer timer = new Timer();
+        timer.schedule(new HeartbeatTask(channel, name, conferenceRooms), 0, HEARTBEAT_INTERVAL);
     }
 
     public HashMap<String, Boolean> generateRandomRooms(int amount) {
@@ -32,7 +75,7 @@ public class Building {
         return conferenceRooms.get(roomName);
     }
 
-    public String bookRoom(String roomName){
+    public String bookRoom(String roomName) {
         if (conferenceRooms.getOrDefault(roomName, false)) {
             conferenceRooms.put(roomName, false);
             return java.util.UUID.randomUUID().toString().substring(0, 8); // Generate a unique reservation number
@@ -49,7 +92,33 @@ public class Building {
         return false;
     }
 
-    public void run() {
+    private class HeartbeatTask extends TimerTask {
+        private final Channel channel;
+        private final String buildingName;
+        private final HashMap<String, Boolean> rooms;
 
+        public HeartbeatTask(Channel channel, String buildingName, HashMap<String, Boolean> rooms) {
+            this.channel = channel;
+            this.buildingName = buildingName;
+            this.rooms = rooms;
+        }
+
+        @Override
+        public void run() {
+            try {
+                Map<String, Object> message = new HashMap<>();
+                message.put("building", buildingName);
+                message.put("rooms", rooms);
+                message.put("timestamp", System.currentTimeMillis());
+
+                ObjectMapper objectMapper = new ObjectMapper();
+                String jsonMessage = objectMapper.writeValueAsString(message);
+
+                System.out.println("Sending heartbeat: " + jsonMessage);
+                channel.basicPublish(heartbeatExchange, heartbeatRoutingKey, null, jsonMessage.getBytes(StandardCharsets.UTF_8));
+            } catch (Exception e) {
+                throw new RuntimeException("Failed to send heartbeat", e);
+            }
+        }
     }
 }
