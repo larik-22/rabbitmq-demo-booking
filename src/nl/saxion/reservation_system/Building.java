@@ -15,8 +15,8 @@ public class Building {
     private Channel channel;
     public static final long HEARTBEAT_INTERVAL = 1000;
     private static final String RENTAL_AGENT_EXCHANGE = "building_to_rental_agent";
-    private final String heartbeatRoutingKey = "building_heartbeat";
     private final String heartbeatExchange = "building_heartbeat_exchange";
+    private final String heartbeatRoutingKey = "building_heartbeat";
 
     private final String name;
     private final HashMap<String, Boolean> conferenceRooms;
@@ -40,20 +40,6 @@ public class Building {
         Connection connection = factory.newConnection();
         this.channel = connection.createChannel();
 
-//        // Declare exchange for sending room availability
-//        channel.exchangeDeclare(RENTAL_AGENT_EXCHANGE, BuiltinExchangeType.DIRECT);
-//
-//        // Listening for requests from rental agents (using a fanout exchange)
-//        String requestQueue = "building_request_queue_" + name;
-//        channel.queueDeclare(requestQueue, false, false, false, null);
-//        channel.queueBind(requestQueue, "rental_agent_to_building", "");
-//
-//        DeliverCallback deliverCallback = (consumerTag, delivery) -> {
-//            String message = new String(delivery.getBody(), "UTF-8");
-//            System.out.println(" [x] Building received: '" + message + "'");
-//        };
-//
-//        channel.basicConsume(requestQueue, true, deliverCallback, consumerTag -> {});
         sendHeartbeat(channel);
     }
 
@@ -103,6 +89,7 @@ public class Building {
             this.rooms = rooms;
         }
 
+
         @Override
         public void run() {
             try {
@@ -115,7 +102,7 @@ public class Building {
                 String jsonMessage = objectMapper.writeValueAsString(message);
 
                 System.out.println("Sending heartbeat: " + jsonMessage);
-                channel.basicPublish(heartbeatExchange, heartbeatRoutingKey, null, jsonMessage.getBytes(StandardCharsets.UTF_8));
+                channel.basicPublish(heartbeatExchange, "", null, jsonMessage.getBytes(StandardCharsets.UTF_8));
             } catch (Exception e) {
                 throw new RuntimeException("Failed to send heartbeat", e);
             }

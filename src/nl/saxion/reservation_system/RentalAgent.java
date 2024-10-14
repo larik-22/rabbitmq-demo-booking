@@ -26,69 +26,69 @@ public class RentalAgent {
     private static final String CUSTOMER_REPLY_EXCHANGE = "agent_to_customer_exchange";
 
     private final String name;
-    //    private final List<String> knownBuildings; // Keeps track of buildings the agent can interact with
     private final HashMap<String, String> pendingReservations; // Track reservations (Reservation number -> Building)
-    private final List<String> activeReservations;
-    private final Map<String, Map<String, Boolean>> buildings;// Store confirmed reservations
+    private final List<String> activeReservations; // Store confirmed reservations
+    private final Map<String, Map<String, Boolean>> knownBuildings; // Building name -> Rooms -> Availability
+    private final Map<String, Long> lastHeartbeatTimestamps = new ConcurrentHashMap<>();
 
     public RentalAgent(String name) {
         this.name = name;
-//        this.knownBuildings = new ArrayList<>();
         this.pendingReservations = new HashMap<>();
         this.activeReservations = new ArrayList<>();
-        this.buildings = new HashMap<>();
+        this.knownBuildings = new HashMap<>();
     }
 
     public void run() throws IOException, TimeoutException {
         setupRabbitMq();
     }
-    public void setupRabbitMq() throws IOException, TimeoutException {
+
+    private void setupRabbitMq() throws IOException, TimeoutException {
+        initializeConnection();
+        setupHeartbeatListener();
+        setupCustomerRequestListener();
+    }
+
+    private void initializeConnection() throws IOException, TimeoutException {
         ConnectionFactory factory = new ConnectionFactory();
         Connection connection = factory.newConnection();
         this.channel = connection.createChannel();
+    }
 
-        // Declare the exchange for receiving heartbeats from buildings
-        channel.exchangeDeclare(BUILDING_HEARTBEAT_EXCHANGE, BuiltinExchangeType.DIRECT);
+    private void setupHeartbeatListener() throws IOException {
+        channel.exchangeDeclare(BUILDING_HEARTBEAT_EXCHANGE, BuiltinExchangeType.FANOUT);
 
-        // Queue for listening to heartbeats
         String heartbeatQueue = "agent_heartbeat_queue_" + name;
         channel.queueDeclare(heartbeatQueue, false, false, false, null);
-        channel.queueBind(heartbeatQueue, BUILDING_HEARTBEAT_EXCHANGE, BUILDING_HEARTBEAT_ROUTING_KEY);
+        channel.queueBind(heartbeatQueue, BUILDING_HEARTBEAT_EXCHANGE, "");
 
-        // Listen for heartbeats from buildings
         DeliverCallback heartbeatCallback = (consumerTag, delivery) -> {
             String message = new String(delivery.getBody(), StandardCharsets.UTF_8);
-            System.out.println(" [x] Received Heartbeat: '" + message + "'");
-
-            // Update building information
+//            System.out.println(" [x] Received heartbeat: '" + message + "'");
             updateBuildingList(message);
         };
 
         channel.basicConsume(heartbeatQueue, true, heartbeatCallback, consumerTag -> {
         });
-
-//    // Declare a queue for customer requests
-//    channel.queueDeclare(AGENT_REQUEST_QUEUE, false, false, false, null);
-//
-//    // Listen for customer requests
-//    DeliverCallback customerRequestCallback = (consumerTag, delivery) -> {
-//        String message = new String(delivery.getBody(), StandardCharsets.UTF_8);
-//        System.out.println(" [x] Customer Request: '" + message + "'");
-//
-//        // Send the list of buildings back to the customer
-//        respondToCustomerRequest(channel, delivery.getProperties().getReplyTo(), delivery.getProperties().getCorrelationId());
-//    };
-//    channel.basicConsume(AGENT_REQUEST_QUEUE, true, customerRequestCallback, consumerTag -> {});
     }
 
+    private void setupCustomerRequestListener() throws IOException {
+        channel.exchangeDeclare(CUSTOMER_REQUEST_EXCHANGE, BuiltinExchangeType.DIRECT);
+        channel.queueDeclare(AGENT_REQUEST_QUEUE, false, false, false, null);
+        channel.queueBind(AGENT_REQUEST_QUEUE, CUSTOMER_REQUEST_EXCHANGE, "rental_agent_request");
 
-    // src/nl/saxion/reservation_system/RentalAgent.java
+        DeliverCallback customerRequestCallback = (consumerTag, delivery) -> {
+            String message = new String(delivery.getBody(), StandardCharsets.UTF_8);
+            System.out.println(" [x] Customer Request: '" + message + "'");
+            respondToCustomerRequest(channel, delivery.getProperties().getReplyTo(), delivery.getProperties().getCorrelationId());
+        };
 
-
-    private final Map<String, Long> lastHeartbeatTimestamps = new ConcurrentHashMap<>();
+        channel.basicConsume(AGENT_REQUEST_QUEUE, true, customerRequestCallback, consumerTag -> {
+        });
+    }
 
     private void updateBuildingList(String message) {
         try {
+            // Assuming format: Sending heartbeat: {"rooms":{"Room 2":true,"Room 1":true,"Room 0":true},"building":"Building a15fb35c","timestamp":1728904189706}
             ObjectMapper objectMapper = new ObjectMapper();
             Map<String, Object> parsedMessage = objectMapper.readValue(message, Map.class);
 
@@ -97,14 +97,14 @@ public class RentalAgent {
             long timestamp = (long) parsedMessage.get("timestamp");
 
             // Update the buildings map and last heartbeat timestamp
-            buildings.put(buildingName, rooms);
+            knownBuildings.put(buildingName, rooms);
             lastHeartbeatTimestamps.put(buildingName, timestamp);
-            System.out.println("Updated Building List: " + buildings);
-            System.out.println("Last Heartbeat Timestamps: " + lastHeartbeatTimestamps);
 
+            // Remove buildings that haven't sent a heartbeat in the last 5 seconds
             long currentTime = System.currentTimeMillis();
             lastHeartbeatTimestamps.entrySet().removeIf(entry -> (currentTime - entry.getValue()) > 5000);
-            buildings.keySet().removeIf(building -> !lastHeartbeatTimestamps.containsKey(building));
+            knownBuildings.keySet().removeIf(building -> !lastHeartbeatTimestamps.containsKey(building));
+
         } catch (IOException e) {
             e.printStackTrace();
         }
@@ -112,15 +112,21 @@ public class RentalAgent {
 
     // Respond to customer requests by sending the list of buildings
     private void respondToCustomerRequest(Channel channel, String replyQueue, String correlationId) throws IOException {
-        // Convert the internal list of buildings to a string format
+        long currentTime = System.currentTimeMillis();
+
+        // Step 1: Filter the buildings based on the timestamp
         StringBuilder responseBuilder = new StringBuilder();
-        for (Map.Entry<String, Map<String, Boolean>> buildingEntry : buildings.entrySet()) {
-            responseBuilder.append("Building: ").append(buildingEntry.getKey()).append(", Rooms: ").append(buildingEntry.getValue()).append("\n");
+        for (Map.Entry<String, Map<String, Boolean>> buildingEntry : knownBuildings.entrySet()) {
+            long lastTimestamp = lastHeartbeatTimestamps.getOrDefault(buildingEntry.getKey(), 0L);
+            if ((currentTime - lastTimestamp) <= 5000) {
+                responseBuilder.append("Building: ").append(buildingEntry.getKey())
+                        .append(", Rooms: ").append(buildingEntry.getValue()).append("\n");
+            }
         }
 
         String response = responseBuilder.toString();
 
-        // Send the response back to the customer using the reply-to pattern
+        // Step 2: Send the response back to the customer via the replyTo queue
         AMQP.BasicProperties replyProps = new AMQP.BasicProperties.Builder()
                 .correlationId(correlationId)
                 .build();
