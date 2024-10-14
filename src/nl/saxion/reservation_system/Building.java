@@ -16,7 +16,6 @@ public class Building {
     public static final long HEARTBEAT_INTERVAL = 1000;
     private static final String RENTAL_AGENT_EXCHANGE = "building_to_rental_agent";
     private final String heartbeatExchange = "building_heartbeat_exchange";
-    private final String heartbeatRoutingKey = "building_heartbeat";
 
     private final String name;
     private final HashMap<String, Boolean> conferenceRooms;

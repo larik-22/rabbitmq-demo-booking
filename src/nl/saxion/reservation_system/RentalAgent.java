@@ -19,7 +19,6 @@ public class RentalAgent {
 
     private Channel channel;
     private static final String BUILDING_HEARTBEAT_EXCHANGE = "building_heartbeat_exchange";
-    private static final String BUILDING_HEARTBEAT_ROUTING_KEY = "building_heartbeat";
     private static final String AGENT_REQUEST_QUEUE = "rental_agent_queue";
     private static final String CUSTOMER_REQUEST_EXCHANGE = "customer_to_agent_exchange";
     private static final String CUSTOMER_REPLY_QUEUE = "agent_to_customer_queue";
@@ -76,19 +75,25 @@ public class RentalAgent {
         channel.queueDeclare(AGENT_REQUEST_QUEUE, false, false, false, null);
         channel.queueBind(AGENT_REQUEST_QUEUE, CUSTOMER_REQUEST_EXCHANGE, "rental_agent_request");
 
+        // 1 for fair dispatching
+        channel.basicQos(1);
+
         DeliverCallback customerRequestCallback = (consumerTag, delivery) -> {
             String message = new String(delivery.getBody(), StandardCharsets.UTF_8);
             System.out.println(" [x] Customer Request: '" + message + "'");
             respondToCustomerRequest(channel, delivery.getProperties().getReplyTo(), delivery.getProperties().getCorrelationId());
+
+            // Acknowledge the message after processing
+            channel.basicAck(delivery.getEnvelope().getDeliveryTag(), false);
         };
 
-        channel.basicConsume(AGENT_REQUEST_QUEUE, true, customerRequestCallback, consumerTag -> {
-        });
+        // Disable auto-acknowledge
+        channel.basicConsume(AGENT_REQUEST_QUEUE, false, customerRequestCallback, consumerTag -> {});
     }
 
     private void updateBuildingList(String message) {
+        // Assuming format: Sending heartbeat: {"rooms":{"Room 2":true,"Room 1":true,"Room 0":true},"building":"Building a15fb35c","timestamp":1728904189706}
         try {
-            // Assuming format: Sending heartbeat: {"rooms":{"Room 2":true,"Room 1":true,"Room 0":true},"building":"Building a15fb35c","timestamp":1728904189706}
             ObjectMapper objectMapper = new ObjectMapper();
             Map<String, Object> parsedMessage = objectMapper.readValue(message, Map.class);
 
@@ -115,11 +120,13 @@ public class RentalAgent {
         long currentTime = System.currentTimeMillis();
 
         // Step 1: Filter the buildings based on the timestamp
+        // Those buildings that haven't sent a response within the last 5 seconds are considered offline
         StringBuilder responseBuilder = new StringBuilder();
         for (Map.Entry<String, Map<String, Boolean>> buildingEntry : knownBuildings.entrySet()) {
             long lastTimestamp = lastHeartbeatTimestamps.getOrDefault(buildingEntry.getKey(), 0L);
             if ((currentTime - lastTimestamp) <= 5000) {
-                responseBuilder.append("Building: ").append(buildingEntry.getKey())
+                responseBuilder
+                        .append("Building: ").append(buildingEntry.getKey())
                         .append(", Rooms: ").append(buildingEntry.getValue()).append("\n");
             }
         }
