@@ -17,7 +17,7 @@ public class Building {
     public static final long HEARTBEAT_INTERVAL = 2500;
     private final String name;
     private final HashMap<String, Boolean> conferenceRooms;
-    private final HashMap<String, Boolean> reservations = new HashMap<>(); // room, reservationFinal
+    private final HashMap<String, Reservation> reservations = new HashMap<>(); // room, reservation
     private Channel channel;
     private String buildingQueue;
 
@@ -87,7 +87,7 @@ public class Building {
                 // Remove the reservation
                 // Send a confirmation to the customer
                 System.out.println("Received cancel reservation request");
-
+                cancelReservation(content, delivery);
             }
         }
     }
@@ -101,7 +101,7 @@ public class Building {
         if (conferenceRooms.get(room)){
             message = UUID.randomUUID().toString().substring(0, 8);
             conferenceRooms.put(room, false);
-            reservations.put(message, false);
+            reservations.put(room, new Reservation(message));
 
             message = "Confirmed " + message;
         } else {
@@ -125,7 +125,7 @@ public class Building {
 
         // Finalize the reservation
         if (reservations.containsKey(reservationId)){
-            reservations.put(reservationId, true);
+            reservations.get(reservationId).setFinalized(true);
         }
 
         // respond to the rental agent first
@@ -141,10 +141,24 @@ public class Building {
 
     private void cancelReservation(String content, Delivery delivery){
         String reservationId = content.split(",")[0];
-        String correlationId = content.split(",")[1];
-        String customerQueue = content.split(",")[2];
+        String room = content.split(",")[1];
+        String correlationId = content.split(",")[2];
+        String customerQueue = content.split(",")[3];
 
-        reservations.remove(reservationId);
+        System.out.println("Reservations before: " + reservations);
+        reservations.remove(room);
+        System.out.println("Reservations after: " + reservations);
+        if(conferenceRooms.containsKey(room)){
+            conferenceRooms.put(room, true);
+        }
+
+        String response = "building/reservation_cancelled/" + "Reservation Cancelled" + "," + reservationId + "," + correlationId + "," + customerQueue;
+        try {
+            new HeartbeatTask(channel).run();
+            channel.basicPublish("", delivery.getProperties().getReplyTo(), null, response.getBytes(StandardCharsets.UTF_8));
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
     }
 
     private HashMap<String, Boolean> generateRandomRooms(int amount) {
@@ -181,7 +195,7 @@ public class Building {
                 String jsonMessage = "building/heartbeat/" + objectMapper.writeValueAsString(message);
 
                 //TODO: uncomment to debug
-//                System.out.println("Sending heartbeat: " + jsonMessage);
+                System.out.println("Sending heartbeat: " + jsonMessage);
                 channel.basicPublish("heartbeat_exchange", "", null, jsonMessage.getBytes(StandardCharsets.UTF_8));
             } catch (Exception e) {
                 throw new RuntimeException("Failed to send heartbeat", e);

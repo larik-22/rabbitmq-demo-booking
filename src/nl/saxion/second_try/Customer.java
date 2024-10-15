@@ -13,7 +13,10 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 public class Customer {
-    public static void main(String[] args) throws IOException, TimeoutException {new Customer().run();}
+    public static void main(String[] args) throws IOException, TimeoutException {
+        new Customer().run();
+    }
+
     private static final List<String> MENU = List.of("View available rooms", "Make a reservation", "Cancel reservation", "Quit");
     private static final Scanner scanner = new java.util.Scanner(System.in);
 
@@ -41,10 +44,10 @@ public class Customer {
                     requestAvailableRooms();
                 }
                 case 2 -> {
-                     makeReservation();
+                    makeReservation();
                 }
                 case 3 -> {
-                     cancelReservation();
+                    cancelReservation(null);
                 }
                 case 4 -> {
                     System.out.println("Goodbye!");
@@ -96,10 +99,11 @@ public class Customer {
             channel.basicConsume(customerQueue, true, (consumerTag, delivery) -> {
                 String message = new String(delivery.getBody(), StandardCharsets.UTF_8);
 
-                if(!responseQueue.offer(message)){
+                if (!responseQueue.offer(message)) {
                     System.out.println("Failed to add message to queue");
                 }
-            }, consumerTag -> {});
+            }, consumerTag -> {
+            });
         } catch (Exception e) {
             e.printStackTrace();
         }
@@ -126,7 +130,7 @@ public class Customer {
             } else {
                 System.out.println("Received response: " + response);
             }
-        } catch (Exception e){
+        } catch (Exception e) {
             e.printStackTrace();
         }
     }
@@ -168,20 +172,19 @@ public class Customer {
                     String userResponse = scanner.next();
                     if ("y".equalsIgnoreCase(userResponse)) {
                         confirmReservation(response.split(" ")[1]);
-
                     } else if ("n".equalsIgnoreCase(userResponse)) {
-//                        cancelReservation(response);
+                        cancelReservation(response.split(" ")[1]);
                     } else {
                         System.out.println("Invalid input. Reservation not confirmed.");
                     }
                 }
             }
-        } catch (Exception e){
+        } catch (Exception e) {
             e.printStackTrace();
         }
     }
 
-    private void confirmReservation(String reservationNumber){
+    private void confirmReservation(String reservationNumber) {
         // Send a confirmation to the rental agent
         // Wait for the confirmation response
         // Display the confirmation response
@@ -203,39 +206,42 @@ public class Customer {
             } else {
                 System.out.println("Received response: " + response);
             }
-        } catch (Exception e){
+        } catch (Exception e) {
             e.printStackTrace();
         }
     }
 
-    private void cancelReservation() {
-        // 1. Get user input for the reservation number to cancel
-        // 2. Send a cancel reservation request to the rental agent
-        // 3. Wait for the response (if not received, display an error message)
-        // 4. Display the response (handled by consumeMessages)
-
-        System.out.println("Enter the reservation number to cancel:");
-        String reservationNumber = scanner.next();
-
-        try {
-            String correlationId = UUID.randomUUID().toString();
-            AMQP.BasicProperties props = new AMQP.BasicProperties.Builder()
-                    .correlationId(correlationId)
-                    .replyTo(customerQueue)
-                    .build();
-
-            String message = "customer/cancel_reservation/" + reservationNumber;
-            System.out.println("[x] Sending cancel reservation request for " + reservationNumber);
-            channel.basicPublish("customer_exchange", "rental_agent_queue", true, props, message.getBytes(StandardCharsets.UTF_8));
-
-            String response = responseQueue.poll(10, TimeUnit.SECONDS);
-            if (response == null) {
-                System.out.println("No response received");
-            } else {
-                System.out.println("Received response: " + response);
+    private void cancelReservation(String reservationNumber) {
+        {
+            // 1. Get user input for the reservation number to cancel
+            // 2. Send a cancel reservation request to the rental agent
+            // 3. Wait for the response (if not received, display an error message)
+            // 4. Display the response (handled by consumeMessages)
+            if (reservationNumber == null) {
+                System.out.println("Enter the reservation number to cancel:");
+                reservationNumber = scanner.next();
             }
-        } catch (Exception e){
-            e.printStackTrace();
+
+            try {
+                String correlationId = UUID.randomUUID().toString();
+                AMQP.BasicProperties props = new AMQP.BasicProperties.Builder()
+                        .correlationId(correlationId)
+                        .replyTo(customerQueue)
+                        .build();
+
+                String message = "customer/cancel_reservation/" + reservationNumber;
+                System.out.println("[x] Sending cancel reservation request for " + reservationNumber);
+                channel.basicPublish("customer_exchange", "rental_agent_queue", true, props, message.getBytes(StandardCharsets.UTF_8));
+
+                String response = responseQueue.poll(10, TimeUnit.SECONDS);
+                if (response == null) {
+                    System.out.println("No response received");
+                } else {
+                    System.out.println("Received response: " + response);
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
         }
     }
 }
