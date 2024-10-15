@@ -12,7 +12,6 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
-
 public class Customer {
     public static void main(String[] args) throws IOException, TimeoutException {new Customer().run();}
     private static final List<String> MENU = List.of("View available rooms", "Make a reservation", "Cancel reservation", "Quit");
@@ -156,6 +155,46 @@ public class Customer {
 
             String message = "customer/make_reservation/" + building + "," + room;
             System.out.println("[x] Sending reservation request for " + building + "," + room);
+            channel.basicPublish("customer_exchange", "rental_agent_queue", true, props, message.getBytes(StandardCharsets.UTF_8));
+
+            String response = responseQueue.poll(10, TimeUnit.SECONDS);
+            if (response == null) {
+                System.out.println("No response received");
+            } else {
+                System.out.println("Received response: " + response);
+                // We get a message like: Confirmed 05ebae67
+                if (response.contains("Confirm")) {
+                    System.out.println("Do you want to confirm the reservation? (y/n):");
+                    String userResponse = scanner.next();
+                    if ("y".equalsIgnoreCase(userResponse)) {
+                        //
+                        confirmReservation(response.split(" ")[1]);
+                    } else if ("n".equalsIgnoreCase(userResponse)) {
+//                        cancelReservation(response);
+                    } else {
+                        System.out.println("Invalid input. Reservation not confirmed.");
+                    }
+                }
+            }
+        } catch (Exception e){
+            e.printStackTrace();
+        }
+    }
+
+    private void confirmReservation(String reservationNumber){
+        // Send a confirmation to the rental agent
+        // Wait for the confirmation response
+        // Display the confirmation response
+        try {
+            String correlationId = UUID.randomUUID().toString();
+            AMQP.BasicProperties props = new AMQP.BasicProperties.Builder()
+                    .correlationId(correlationId)
+                    .replyTo(customerQueue)
+                    .build();
+
+
+            String message = "customer/confirm_reservation/" + reservationNumber;
+            System.out.println("[x] Sending confirmation for reservation: " + message);
             channel.basicPublish("customer_exchange", "rental_agent_queue", true, props, message.getBytes(StandardCharsets.UTF_8));
 
             String response = responseQueue.poll(10, TimeUnit.SECONDS);

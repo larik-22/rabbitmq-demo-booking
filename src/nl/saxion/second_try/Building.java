@@ -1,5 +1,6 @@
 package nl.saxion.second_try;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.rabbitmq.client.*;
 
@@ -9,11 +10,14 @@ import java.util.*;
 import java.util.concurrent.TimeoutException;
 
 public class Building {
-    public static void main(String[] args) throws IOException, TimeoutException {new Building("Building_" + UUID.randomUUID().toString().substring(0, 8)).run();}
+    public static void main(String[] args) throws IOException, TimeoutException {
+        new Building("Building_" + UUID.randomUUID().toString().substring(0, 8)).run();
+    }
 
     public static final long HEARTBEAT_INTERVAL = 2500;
     private final String name;
     private final HashMap<String, Boolean> conferenceRooms;
+    private final HashMap<String, Boolean> reservations = new HashMap<>(); // room, reservationFinal
     private Channel channel;
     private String buildingQueue;
 
@@ -55,13 +59,12 @@ public class Building {
 
         channel.basicConsume(buildingQueue, true, (consumerTag, delivery) -> {
             String message = new String(delivery.getBody(), StandardCharsets.UTF_8);
-            System.out.println("Received message: " + message);
             processMessage(message.split("/"), delivery);
-
-        }, consumerTag -> {});
+        }, consumerTag -> {
+        });
     }
 
-    private void processMessage(String[] messageParts, Delivery delivery){
+    private void processMessage(String[] messageParts, Delivery delivery) {
         String messageType = messageParts[1].toLowerCase();
         String content = messageParts.length > 2 ? messageParts[2] : "";
 
@@ -74,29 +77,60 @@ public class Building {
                 // Respond back with the availability (reply to the rental agent)
                 processReservation(content, delivery);
             }
+            case "confirm_reservation" -> {
+                // Update the reservation status
+                // Send a confirmation to the customer
+                // [x] Received message: 0fd4ad38,fe2dfc9b-ff76-497c-a0ff-2d49cdc34b30,Customer 0641976c
+                confirmReservation(content, delivery);
+            }
+            case "cancel_reservation" -> {
+                // Remove the reservation
+                // Send a confirmation to the customer
+            }
         }
     }
 
-    private void processReservation(String content, Delivery delivery){
-        // If room available, return unique reservation ID and book the room
-        // If not available, return "Room not available"
+    private void processReservation(String content, Delivery delivery) {
         String room = content.split(",")[1];
         String correlationId = content.split(",")[2];
         String customerQueue = content.split(",")[3];
 
-        String response;
-        if(conferenceRooms.get(room) != null && conferenceRooms.get(room)){
-            response = "building/reservation_response/" + UUID.randomUUID().toString().substring(0, 8);
+        String message;
+        if (conferenceRooms.get(room)){
+            message = UUID.randomUUID().toString().substring(0, 8);
             conferenceRooms.put(room, false);
+            reservations.put(message, false);
+
+            message = "Confirmed " + message;
         } else {
-            response = "building/reservation_response/Room not available";
+            message = "Room is not available";
         }
 
-        response = response + "," + correlationId + "," + customerQueue;
+        String response = "building/reservation_response/" + name + "," + room + "," + message + "," + correlationId + "," + customerQueue;
 
-        // reply to agent
-        System.out.println("Sending response: " + response);
         try {
+            new HeartbeatTask(channel).run();
+            channel.basicPublish("", delivery.getProperties().getReplyTo(), null, response.getBytes(StandardCharsets.UTF_8));
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void confirmReservation(String content, Delivery delivery){
+        String reservationId = content.split(",")[0];
+        String correlationId = content.split(",")[1];
+        String customerQueue = content.split(",")[2];
+
+        // Finalize the reservation
+        if (reservations.containsKey(reservationId)){
+            reservations.put(reservationId, true);
+        }
+
+        // respond to the rental agent first
+        String response = "building/reservation_finalized/" + "Reservation Finalized" + "," + reservationId + "," + correlationId + "," + customerQueue;
+        try {
+            // Immediately send a heartbeat to all the agents
+            new HeartbeatTask(channel).run();
             channel.basicPublish("", delivery.getProperties().getReplyTo(), null, response.getBytes(StandardCharsets.UTF_8));
         } catch (IOException e) {
             e.printStackTrace();
@@ -114,27 +148,24 @@ public class Building {
 
     private void sendHeartbeat(Channel channel) {
         Timer timer = new Timer();
-        timer.schedule(new HeartbeatTask(channel, name, conferenceRooms), 0, HEARTBEAT_INTERVAL);
+        timer.schedule(new HeartbeatTask(channel), 0, HEARTBEAT_INTERVAL);
     }
 
     private class HeartbeatTask extends TimerTask {
         private final Channel channel;
-        private final String buildingName;
-        private final HashMap<String, Boolean> rooms;
 
-        public HeartbeatTask(Channel channel, String buildingName, HashMap<String, Boolean> rooms) {
+        public HeartbeatTask(Channel channel) {
             this.channel = channel;
-            this.buildingName = buildingName;
-            this.rooms = rooms;
         }
 
         @Override
         public void run() {
             try {
                 Map<String, Object> message = new HashMap<>();
-                message.put("building", buildingName);
-                message.put("rooms", rooms);
+                message.put("building", name);
+                message.put("rooms", conferenceRooms);
                 message.put("timestamp", System.currentTimeMillis());
+                message.put("reservations", reservations);
 
                 ObjectMapper objectMapper = new ObjectMapper();
                 String jsonMessage = "building/heartbeat/" + objectMapper.writeValueAsString(message);
