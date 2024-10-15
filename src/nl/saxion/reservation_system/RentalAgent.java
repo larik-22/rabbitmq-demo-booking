@@ -5,28 +5,31 @@ import com.rabbitmq.client.*;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeoutException;
 
 public class RentalAgent {
     public static void main(String[] args) throws IOException, TimeoutException {
-        new RentalAgent("Agent " + java.util.UUID.randomUUID().toString().substring(0, 8)).run();
+        new RentalAgent("Agent " + UUID.randomUUID().toString().substring(0, 8)).run();
     }
 
-    private Channel channel;
     private static final String BUILDING_HEARTBEAT_EXCHANGE = "building_heartbeat_exchange";
-    private static final String AGENT_REQUEST_QUEUE = "rental_agent_queue";
+    private static final String BUILDING_AVAILABILITY_EXCHANGE = "building_availability_exchange";
+    private static final String RESERVATION_EXCHANGE = "reservation_exchange";
     private static final String CUSTOMER_REQUEST_EXCHANGE = "customer_to_agent_exchange";
-    private static final String CUSTOMER_REPLY_QUEUE = "agent_to_customer_queue";
-    private static final String CUSTOMER_REPLY_EXCHANGE = "agent_to_customer_exchange";
+    private static final String AGENT_REQUEST_QUEUE = "rental_agent_queue";
+    private static final String RESERVATION_WORK_QUEUE = "work_reservation_queue";
 
+
+    private Channel channel;
     private final String name;
+
+    // Reservation related
     private final HashMap<String, String> pendingReservations; // Track reservations (Reservation number -> Building)
     private final List<String> activeReservations; // Store confirmed reservations
+
+    // Building related
     private final Map<String, Map<String, Boolean>> knownBuildings; // Building name -> Rooms -> Availability
     private final Map<String, Long> lastHeartbeatTimestamps = new ConcurrentHashMap<>();
 
@@ -44,13 +47,92 @@ public class RentalAgent {
     private void setupRabbitMq() throws IOException, TimeoutException {
         initializeConnection();
         setupHeartbeatListener();
-        setupCustomerRequestListener();
+        setupBuildingsRequestListener();
+        setupRentalRequestListener();
+
     }
 
     private void initializeConnection() throws IOException, TimeoutException {
         ConnectionFactory factory = new ConnectionFactory();
         Connection connection = factory.newConnection();
         this.channel = connection.createChannel();
+    }
+
+    private void setupRentalRequestListener() throws IOException {
+        channel.exchangeDeclare(RESERVATION_EXCHANGE, BuiltinExchangeType.DIRECT);
+        channel.queueDeclare(RESERVATION_WORK_QUEUE, false, false, false, null);
+        channel.queueBind(RESERVATION_WORK_QUEUE, RESERVATION_EXCHANGE, "");
+        channel.basicQos(1);
+
+        DeliverCallback reservationCallback = (consumerTag, delivery) -> {
+            String message = new String(delivery.getBody(), StandardCharsets.UTF_8);
+            ObjectMapper objectMapper = new ObjectMapper();
+            Map<String, String> request = objectMapper.readValue(message, Map.class);
+
+            String buildingName = request.get("buildingName");
+            String roomName = request.get("roomName");
+            String replyQueue = request.get("replyTo");
+            String correlationId = request.get("correlationId");
+
+            System.out.println("Received reservation request: " + buildingName + ", Room: " + roomName + ", ReplyTo: " + replyQueue + ", CorrelationId: " + correlationId);
+            if (knownBuildings.containsKey(buildingName) && knownBuildings.get(buildingName).containsKey(roomName)) {
+                queryBuildingForReservation(request);
+            } else {
+                System.out.println("Room unavailable");
+                sendRoomUnavailableMessage(replyQueue, correlationId);
+            }
+        };
+
+        channel.basicConsume(RESERVATION_WORK_QUEUE, false, reservationCallback, consumerTag -> {});
+    }
+
+    private void queryBuildingForReservation(Map<String, String> request) throws IOException {
+        ObjectMapper objectMapper = new ObjectMapper();
+        String requestJson = objectMapper.writeValueAsString(request);
+
+        channel.exchangeDeclare(BUILDING_AVAILABILITY_EXCHANGE, BuiltinExchangeType.DIRECT);
+        channel.basicPublish(BUILDING_AVAILABILITY_EXCHANGE, request.get("buildingName"), null, requestJson.getBytes(StandardCharsets.UTF_8));
+
+        // Listen for the reply
+        DeliverCallback deliverCallback = (consumerTag, delivery) -> {
+            String message = new String(delivery.getBody(), StandardCharsets.UTF_8);
+            Map<String, String> response = objectMapper.readValue(message, Map.class);
+
+            String replyQueue = response.get("replyTo");
+            String correlationId = response.get("correlationId");
+            String reservationNumber = response.get("reservationNumber");
+
+            if (reservationNumber != null) {
+                sendReservationNumber(replyQueue, reservationNumber);
+            } else {
+                sendRoomUnavailableMessage(replyQueue, correlationId);
+            }
+        };
+
+        channel.basicConsume(request.get("replyTo"), true, deliverCallback, consumerTag -> {});
+    }
+
+
+    // Sends reservation number to the customer
+    private void sendReservationNumber(String replyQueue, String reservationNumber) throws IOException {
+        String response = "Reservation number: " + reservationNumber;
+
+        // Send reservation number back to the customer
+        AMQP.BasicProperties props = new AMQP.BasicProperties.Builder().replyTo(replyQueue).build();
+        channel.basicPublish("", replyQueue, props, response.getBytes(StandardCharsets.UTF_8));
+    }
+
+    // Sends room unavailable message
+    private void sendRoomUnavailableMessage(String replyQueue, String correlationId) throws IOException {
+        String response = "Room unavailable";
+
+        // Send room unavailable message back to the customer
+        AMQP.BasicProperties props = new AMQP.BasicProperties.Builder()
+                .correlationId(correlationId)
+                .replyTo(replyQueue)
+                .build();
+
+        channel.basicPublish("", replyQueue, props, response.getBytes(StandardCharsets.UTF_8));
     }
 
     private void setupHeartbeatListener() throws IOException {
@@ -70,7 +152,7 @@ public class RentalAgent {
         });
     }
 
-    private void setupCustomerRequestListener() throws IOException {
+    private void setupBuildingsRequestListener() throws IOException {
         channel.exchangeDeclare(CUSTOMER_REQUEST_EXCHANGE, BuiltinExchangeType.DIRECT);
         channel.queueDeclare(AGENT_REQUEST_QUEUE, false, false, false, null);
         channel.queueBind(AGENT_REQUEST_QUEUE, CUSTOMER_REQUEST_EXCHANGE, "rental_agent_request");
@@ -81,14 +163,14 @@ public class RentalAgent {
         DeliverCallback customerRequestCallback = (consumerTag, delivery) -> {
             String message = new String(delivery.getBody(), StandardCharsets.UTF_8);
             System.out.println(" [x] Customer Request: '" + message + "'");
-            respondToCustomerRequest(channel, delivery.getProperties().getReplyTo(), delivery.getProperties().getCorrelationId());
+            respondToCustomerBuildingRequest(channel, delivery.getProperties().getReplyTo(), delivery.getProperties().getCorrelationId());
 
             // Acknowledge the message after processing
             channel.basicAck(delivery.getEnvelope().getDeliveryTag(), false);
         };
 
-        // Disable auto-acknowledge
-        channel.basicConsume(AGENT_REQUEST_QUEUE, false, customerRequestCallback, consumerTag -> {});
+        channel.basicConsume(AGENT_REQUEST_QUEUE, false, customerRequestCallback, consumerTag -> {
+        });
     }
 
     private void updateBuildingList(String message) {
@@ -116,7 +198,7 @@ public class RentalAgent {
     }
 
     // Respond to customer requests by sending the list of buildings
-    private void respondToCustomerRequest(Channel channel, String replyQueue, String correlationId) throws IOException {
+    private void respondToCustomerBuildingRequest(Channel channel, String replyQueue, String correlationId) throws IOException {
         long currentTime = System.currentTimeMillis();
 
         // Step 1: Filter the buildings based on the timestamp
