@@ -86,6 +86,8 @@ public class Building {
             case "cancel_reservation" -> {
                 // Remove the reservation
                 // Send a confirmation to the customer
+                System.out.println("Received cancel reservation request");
+
             }
         }
     }
@@ -135,6 +137,14 @@ public class Building {
         } catch (IOException e) {
             e.printStackTrace();
         }
+    }
+
+    private void cancelReservation(String content, Delivery delivery){
+        String reservationId = content.split(",")[0];
+        String correlationId = content.split(",")[1];
+        String customerQueue = content.split(",")[2];
+
+        reservations.remove(reservationId);
     }
 
     private HashMap<String, Boolean> generateRandomRooms(int amount) {

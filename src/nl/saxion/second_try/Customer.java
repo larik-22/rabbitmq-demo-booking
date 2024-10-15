@@ -44,7 +44,7 @@ public class Customer {
                      makeReservation();
                 }
                 case 3 -> {
-                    // cancelReservation();
+                     cancelReservation();
                 }
                 case 4 -> {
                     System.out.println("Goodbye!");
@@ -167,8 +167,8 @@ public class Customer {
                     System.out.println("Do you want to confirm the reservation? (y/n):");
                     String userResponse = scanner.next();
                     if ("y".equalsIgnoreCase(userResponse)) {
-                        //
                         confirmReservation(response.split(" ")[1]);
+
                     } else if ("n".equalsIgnoreCase(userResponse)) {
 //                        cancelReservation(response);
                     } else {
@@ -195,6 +195,37 @@ public class Customer {
 
             String message = "customer/confirm_reservation/" + reservationNumber;
             System.out.println("[x] Sending confirmation for reservation: " + message);
+            channel.basicPublish("customer_exchange", "rental_agent_queue", true, props, message.getBytes(StandardCharsets.UTF_8));
+
+            String response = responseQueue.poll(10, TimeUnit.SECONDS);
+            if (response == null) {
+                System.out.println("No response received");
+            } else {
+                System.out.println("Received response: " + response);
+            }
+        } catch (Exception e){
+            e.printStackTrace();
+        }
+    }
+
+    private void cancelReservation() {
+        // 1. Get user input for the reservation number to cancel
+        // 2. Send a cancel reservation request to the rental agent
+        // 3. Wait for the response (if not received, display an error message)
+        // 4. Display the response (handled by consumeMessages)
+
+        System.out.println("Enter the reservation number to cancel:");
+        String reservationNumber = scanner.next();
+
+        try {
+            String correlationId = UUID.randomUUID().toString();
+            AMQP.BasicProperties props = new AMQP.BasicProperties.Builder()
+                    .correlationId(correlationId)
+                    .replyTo(customerQueue)
+                    .build();
+
+            String message = "customer/cancel_reservation/" + reservationNumber;
+            System.out.println("[x] Sending cancel reservation request for " + reservationNumber);
             channel.basicPublish("customer_exchange", "rental_agent_queue", true, props, message.getBytes(StandardCharsets.UTF_8));
 
             String response = responseQueue.poll(10, TimeUnit.SECONDS);

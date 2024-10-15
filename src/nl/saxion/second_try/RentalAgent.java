@@ -84,7 +84,6 @@ public class RentalAgent {
         // 1. Parse the message
         // 2. Process the message
         // 3. Send a response
-        System.out.println();
         String sender = messageParts[0].toLowerCase();
         String messageType = messageParts[1].toLowerCase();
         String content = messageParts.length > 2 ? messageParts[2] : "";
@@ -97,7 +96,7 @@ public class RentalAgent {
                 switch (messageType) {
                     case "heartbeat" -> {
                         //Process heartbeat message
-                        updateBuildingList(content);
+                        updateBuildings(content);
                     }
                     case "reservation_response" -> {
                         // Process availability message
@@ -111,6 +110,11 @@ public class RentalAgent {
                         // Respond to the customer with the reservation number
                         System.out.println("Finalized reservation: " + content);
                         finalizeReservation(content);
+                    }
+                    case "reservation_cancelled" -> {
+                        // Process cancelled reservation
+                        // Remove the reservation
+                        // Send a confirmation to the customer
                     }
                 }
             }
@@ -139,6 +143,7 @@ public class RentalAgent {
                         //Process cancel message
                         // Forward request to building and wait for response
                         // Forward response to customer
+                        processCancellation(content, delivery);
                     }
                 }
             }
@@ -146,8 +151,8 @@ public class RentalAgent {
         }
     }
 
-    private void updateBuildingList(String message) {
-        // Assuming format: Sending heartbeat: {"rooms":{"Room 2":true,"Room 1":true,"Room 0":true},"building":"Building a15fb35c","timestamp":1728904189706}
+    private void updateBuildings(String message) {
+        // [x] Received message from building: {"rooms":{"room_0":false,"room_1":true,"room_2":true},"reservations":{"b196bb26":true},"building":"Building_0ec048bf","timestamp":1729016480940}
         try {
             ObjectMapper objectMapper = new ObjectMapper();
             Map<String, Object> parsedMessage = objectMapper.readValue(message, Map.class);
@@ -344,11 +349,56 @@ public class RentalAgent {
                     .correlationId(correlationId)
                     .build();
 
-            String response = "Message: " + reservationId;
+            String response = message + ": " + reservationId;
             System.out.println("[x] Responding to customer: " + response);
             channel.basicPublish("", customerQueue, props, response.getBytes(StandardCharsets.UTF_8));
         } catch (IOException e) {
             e.printStackTrace();
+        }
+    }
+
+    private void processCancellation(String content, Delivery delivery){
+        // Check if the reservation exists
+        // If so forward the cancellation to the building
+        // If not, respond to the customer
+
+        String reservationId = content.split(",")[0];
+        String replyTo = delivery.getProperties().getReplyTo();
+        String correlationId = delivery.getProperties().getCorrelationId();
+
+        boolean found = false;
+        for (String building : reservations.keySet()) {
+            if (reservations.get(building).containsKey(reservationId)) {
+                try {
+                    AMQP.BasicProperties props = new AMQP.BasicProperties.Builder()
+                            .correlationId(correlationId)
+                            .replyTo(uniqueQueueName)
+                            .build();
+
+                    String message = "building/cancel_reservation/" + reservationId + "," + correlationId + "," + replyTo;
+                    System.out.println("[x] Forwarding cancellation to building: " + message);
+                    channel.basicPublish("building_exchange", building, true, props, message.getBytes(StandardCharsets.UTF_8));
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+
+                found = true;
+                break;
+            }
+        }
+
+        if (!found) {
+            try {
+                AMQP.BasicProperties props = new AMQP.BasicProperties.Builder()
+                        .correlationId(correlationId)
+                        .build();
+
+                String response = "Reservation not found";
+                System.out.println("[x] Responding to customer: " + response);
+                channel.basicPublish("", replyTo, props, response.getBytes(StandardCharsets.UTF_8));
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
         }
     }
 }
