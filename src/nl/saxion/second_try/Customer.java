@@ -22,13 +22,25 @@ public class Customer {
 
     private Channel channel;
     private String customerQueue;
-    private BlockingQueue<String> responseQueue = new ArrayBlockingQueue<>(1);
+    private final BlockingQueue<String> responseQueue = new ArrayBlockingQueue<>(1);
+
 
     public void run() throws IOException, TimeoutException {
         setUpRabbitMQ();
         startApplication();
     }
 
+    /**
+     * Set up RabbitMQ Logic
+     */
+    private void setUpRabbitMQ() throws IOException, TimeoutException {
+        initializeConnection();
+        startListeningForMessages();
+    }
+
+    /**
+     * Start the application
+     */
     public void startApplication() throws IOException {
         // display menu and get user input
         while (true) {
@@ -59,17 +71,6 @@ public class Customer {
     }
 
     /**
-     * Set up RabbitMQ Logic
-     */
-    private void setUpRabbitMQ() throws IOException, TimeoutException {
-        // 1. Connect
-        // 2. Setup exchanges and queues
-        // 3. Consume messages
-        initializeConnection();
-        consumeMessages();
-    }
-
-    /**
      * Connect to RabbitMQ
      */
     private void initializeConnection() throws IOException, TimeoutException {
@@ -81,7 +82,7 @@ public class Customer {
     /**
      * Consume messages from the queue (Listen for any response)
      */
-    private void consumeMessages() throws IOException {
+    private void startListeningForMessages() throws IOException {
         // 1. Create a queue
         // 2. Bind the queue to the exchanges
         // 3. Consume messages
@@ -109,65 +110,80 @@ public class Customer {
     }
 
     /**
+     * Send a message to the rental agent and wait for the response.
+     * If no response is received, display an error message
+     *
+     * @param props   The properties to send with the message (replyTo queue and correlationId)
+     * @param message The message to send
+     */
+    private void sendMessageAndAwaitResponse(AMQP.BasicProperties props, String message) throws IOException, InterruptedException {
+        channel.basicPublish("customer_exchange", "rental_agent_queue", true, props, message.getBytes(StandardCharsets.UTF_8));
+
+        String response = responseQueue.poll(5, TimeUnit.SECONDS);
+        if (response == null) {
+            System.out.println("No response received");
+        } else {
+            System.out.println("Received response: " + response);
+        }
+    }
+
+    /**
+     * Generates AMPQ properties for the message
+     *
+     * @param replyTo The queue to send the response to
+     * @return The properties to send with the message
+     */
+    private AMQP.BasicProperties getProps(String replyTo) {
+        String correlationId = UUID.randomUUID().toString();
+        return new AMQP.BasicProperties.Builder()
+                .correlationId(correlationId)
+                .replyTo(replyTo)
+                .build();
+    }
+
+    /**
      * Send a request to the rental agent to get available rooms
      */
-    private void requestAvailableRooms() throws IOException {
+    private void requestAvailableRooms() {
         try {
-            String correlationId = UUID.randomUUID().toString();
-            AMQP.BasicProperties props = new AMQP.BasicProperties.Builder()
-                    .correlationId(correlationId)
-                    .replyTo(customerQueue)
-                    .build();
-
             System.out.println("[x] Sending request for available rooms");
-            channel.basicPublish("customer_exchange", "rental_agent_queue", true, props, "customer/request_rooms".getBytes(StandardCharsets.UTF_8));
 
-            String response = responseQueue.poll(10, TimeUnit.SECONDS);
-            if (response == null) {
-                System.out.println("No response received");
-            } else {
-                System.out.println("Received response: " + response);
-            }
+            AMQP.BasicProperties props = getProps(customerQueue);
+            sendMessageAndAwaitResponse(props, "customer/request_rooms");
         } catch (Exception e) {
             e.printStackTrace();
         }
     }
 
+    /**
+     * Makes a reservation. Prompts the user for the building and room number
+     * and sends a reservation request to the rental agent. Waits for the response and based on it
+     * proceeds with confirmation or displays an error message.
+     */
     private void makeReservation() {
-        // 1. Get user input for the room and building to reserve
-        // 2. Send a reservation request to the rental agent
-        // 3. Wait for the response (if not received, display an error message)
-        // 4. Display the response (handled by consumeMessages)
-        // 5. If reservation number returned, prompt confirmation (y/n)
-        // 6. Send confirmation to the rental agent
-        // 7. Wait for the confirmation response
-        // 8. Display the confirmation response
-
         System.out.println("Enter the building name:");
         String building = scanner.next();
         System.out.println("Enter the room number:");
         String room = scanner.next();
 
         try {
-            String correlationId = UUID.randomUUID().toString();
-            AMQP.BasicProperties props = new AMQP.BasicProperties.Builder()
-                    .correlationId(correlationId)
-                    .replyTo(customerQueue)
-                    .build();
-
-            String message = "customer/make_reservation/" + building + "," + room;
             System.out.println("[x] Sending reservation request for " + building + "," + room);
+
+            AMQP.BasicProperties props = getProps(customerQueue);
+            String message = "customer/make_reservation/" + building + "," + room;
             channel.basicPublish("customer_exchange", "rental_agent_queue", true, props, message.getBytes(StandardCharsets.UTF_8));
 
-            String response = responseQueue.poll(10, TimeUnit.SECONDS);
+            String response = responseQueue.poll(5, TimeUnit.SECONDS);
             if (response == null) {
                 System.out.println("No response received");
             } else {
                 System.out.println("Received response: " + response);
+
                 // We get a message like: ReservationNr 05ebae67
                 if (response.contains("ReservationNr")) {
                     System.out.println("Do you want to confirm the reservation? (y/n):");
                     String userResponse = scanner.next();
+
                     if ("y".equalsIgnoreCase(userResponse)) {
                         confirmReservation(response.split(" ")[1]);
                     } else {
@@ -180,64 +196,45 @@ public class Customer {
         }
     }
 
+    /**
+     * Send a confirmation request to the rental agent
+     * Wait for the response and display it
+     *
+     * @param reservationNumber The reservation number to confirm
+     */
     private void confirmReservation(String reservationNumber) {
-        // Send a confirmation to the rental agent
-        // Wait for the confirmation response
-        // Display the confirmation response
         try {
-            String correlationId = UUID.randomUUID().toString();
-            AMQP.BasicProperties props = new AMQP.BasicProperties.Builder()
-                    .correlationId(correlationId)
-                    .replyTo(customerQueue)
-                    .build();
-
-
             String message = "customer/confirm_reservation/" + reservationNumber;
             System.out.println("[x] Sending confirmation for reservation: " + message);
-            channel.basicPublish("customer_exchange", "rental_agent_queue", true, props, message.getBytes(StandardCharsets.UTF_8));
 
-            String response = responseQueue.poll(10, TimeUnit.SECONDS);
-            if (response == null) {
-                System.out.println("No response received");
-            } else {
-                System.out.println("Received response: " + response);
-            }
+            AMQP.BasicProperties props = getProps(customerQueue);
+            sendMessageAndAwaitResponse(props, message);
         } catch (Exception e) {
             e.printStackTrace();
         }
     }
 
+    /**
+     * Cancel a reservation
+     * If the reservation number is not provided, prompt the user for it
+     *
+     * @param reservationNumber The reservation number to cancel
+     */
     private void cancelReservation(String reservationNumber) {
-        {
-            // 1. Get user input for the reservation number to cancel
-            // 2. Send a cancel reservation request to the rental agent
-            // 3. Wait for the response (if not received, display an error message)
-            // 4. Display the response (handled by consumeMessages)
-            if (reservationNumber == null) {
-                System.out.println("Enter the reservation number to cancel:");
-                reservationNumber = scanner.next();
-            }
-
-            try {
-                String correlationId = UUID.randomUUID().toString();
-                AMQP.BasicProperties props = new AMQP.BasicProperties.Builder()
-                        .correlationId(correlationId)
-                        .replyTo(customerQueue)
-                        .build();
-
-                String message = "customer/cancel_reservation/" + reservationNumber;
-                System.out.println("[x] Sending cancel reservation request for " + reservationNumber);
-                channel.basicPublish("customer_exchange", "rental_agent_queue", true, props, message.getBytes(StandardCharsets.UTF_8));
-
-                String response = responseQueue.poll(10, TimeUnit.SECONDS);
-                if (response == null) {
-                    System.out.println("No response received");
-                } else {
-                    System.out.println("Received response: " + response);
-                }
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
+        if (reservationNumber == null) {
+            System.out.println("Enter the reservation number to cancel:");
+            reservationNumber = scanner.next();
         }
+
+        try {
+            AMQP.BasicProperties props = getProps(customerQueue);
+            String message = "customer/cancel_reservation/" + reservationNumber;
+            System.out.println("[x] Sending cancel reservation request for " + reservationNumber);
+
+            sendMessageAndAwaitResponse(props, message);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
     }
 }
