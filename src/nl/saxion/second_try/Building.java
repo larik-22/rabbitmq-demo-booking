@@ -7,6 +7,7 @@ import com.rabbitmq.client.*;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeoutException;
 
 public class Building {
@@ -14,10 +15,10 @@ public class Building {
         new Building("Building_" + UUID.randomUUID().toString().substring(0, 8)).run();
     }
 
-    public static final long HEARTBEAT_INTERVAL = 2500;
+    public static final long HEARTBEAT_INTERVAL = 1000;
     private final String name;
     private final HashMap<String, Boolean> conferenceRooms;
-    private final HashMap<String, Reservation> reservations = new HashMap<>(); // room, reservation
+    private final Map<String, Reservation> reservations = new ConcurrentHashMap<>(); // room, reservation
     private Channel channel;
     private String buildingQueue;
 
@@ -35,7 +36,6 @@ public class Building {
         // 2. Setup exchanges and queues
         // 3. Send heartbeats
         // 4. Listen for customer requests
-
         initializeConnection();
         consumeMessages();
         sendHeartbeat(channel);
@@ -103,7 +103,7 @@ public class Building {
             conferenceRooms.put(room, false);
             reservations.put(room, new Reservation(message));
 
-            message = "Confirmed " + message;
+            message = "ReservationNr " + message;
         } else {
             message = "Room is not available";
         }
@@ -124,9 +124,13 @@ public class Building {
         String customerQueue = content.split(",")[2];
 
         // Finalize the reservation
-        if (reservations.containsKey(reservationId)){
-            reservations.get(reservationId).setFinalized(true);
+
+        for (String room : reservations.keySet()) {
+            if (reservations.get(room).getId().equals(reservationId)) {
+                reservations.get(room).setFinalized(true);
+            }
         }
+
 
         // respond to the rental agent first
         String response = "building/reservation_finalized/" + "Reservation Finalized" + "," + reservationId + "," + correlationId + "," + customerQueue;
@@ -145,9 +149,7 @@ public class Building {
         String correlationId = content.split(",")[2];
         String customerQueue = content.split(",")[3];
 
-        System.out.println("Reservations before: " + reservations);
         reservations.remove(room);
-        System.out.println("Reservations after: " + reservations);
         if(conferenceRooms.containsKey(room)){
             conferenceRooms.put(room, true);
         }

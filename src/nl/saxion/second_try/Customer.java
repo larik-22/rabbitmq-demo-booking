@@ -36,26 +36,24 @@ public class Customer {
             for (int i = 0; i < MENU.size(); i++) {
                 System.out.println(i + 1 + ". " + MENU.get(i));
             }
-            System.out.println("Enter your choice:");
-            int choice = scanner.nextInt();
 
-            switch (choice) {
-                case 1 -> {
-                    requestAvailableRooms();
+            System.out.println("Enter your choice:");
+
+            try {
+                int choice = scanner.nextInt();
+                switch (choice) {
+                    case 1 -> requestAvailableRooms();
+                    case 2 -> makeReservation();
+                    case 3 -> cancelReservation(null);
+                    case 4 -> {
+                        System.out.println("Goodbye!");
+                        return;
+                    }
+                    default -> System.out.println("Invalid choice, please try again.");
                 }
-                case 2 -> {
-                    makeReservation();
-                }
-                case 3 -> {
-                    cancelReservation(null);
-                }
-                case 4 -> {
-                    System.out.println("Goodbye!");
-                    return;
-                }
-                default -> {
-                    System.out.println("Invalid choice, please try again.");
-                }
+            } catch (Exception e) {
+                System.out.println("Invalid choice, please try again.");
+                scanner.next();
             }
         }
     }
@@ -166,16 +164,14 @@ public class Customer {
                 System.out.println("No response received");
             } else {
                 System.out.println("Received response: " + response);
-                // We get a message like: Confirmed 05ebae67
-                if (response.contains("Confirm")) {
+                // We get a message like: ReservationNr 05ebae67
+                if (response.contains("ReservationNr")) {
                     System.out.println("Do you want to confirm the reservation? (y/n):");
                     String userResponse = scanner.next();
                     if ("y".equalsIgnoreCase(userResponse)) {
                         confirmReservation(response.split(" ")[1]);
-                    } else if ("n".equalsIgnoreCase(userResponse)) {
-                        cancelReservation(response.split(" ")[1]);
                     } else {
-                        System.out.println("Invalid input. Reservation not confirmed.");
+                        cancelReservation(response.split(" ")[1]);
                     }
                 }
             }

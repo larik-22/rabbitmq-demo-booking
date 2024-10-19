@@ -7,8 +7,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeoutException;
+import java.util.concurrent.*;
 
 public class RentalAgent {
     public static void main(String[] args) throws IOException, TimeoutException {
@@ -23,10 +22,15 @@ public class RentalAgent {
     private final Map<String, Map<String, Boolean>> knownBuildings = new ConcurrentHashMap<>(); // Building name -> Rooms -> Availability
     private final Map<String, Long> lastHeartbeatTimestamps = new ConcurrentHashMap<>();
     private final Map<String, Map<String, Reservation>> reservations = new ConcurrentHashMap<>(); // building -> room/reservation
+    private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
 
-    private final long BUILDING_TIMEOUT = 5000;
     private String uniqueQueueName;
     private Channel channel;
+    private final long BUILDING_TIMEOUT = 5000;
+    private final DeliverCallback deliverCallback = (consumerTag, delivery) -> {
+        String message = new String(delivery.getBody(), StandardCharsets.UTF_8);
+        processMessage(message.split("/"), delivery);
+    };
 
     public void run() throws IOException, TimeoutException {
         setUpRabbitMQ();
@@ -56,28 +60,38 @@ public class RentalAgent {
         // uniqueQueueName is used to create a unique queue for each agent
         uniqueQueueName = channel.queueDeclare().getQueue();
 
-        //Exchanges: Heartbeat, Building availability, Customer requests (Cancel, Make reservation)
+        // Exchanges: Heartbeat, Building availability, Customer requests (Cancel, Make reservation)
         channel.exchangeDeclare("heartbeat_exchange", BuiltinExchangeType.FANOUT);
         channel.exchangeDeclare("building_exchange", BuiltinExchangeType.DIRECT);
-        channel.exchangeDeclare("customer_exchange", BuiltinExchangeType.DIRECT);
 
-        //Bind queues;
+        // Bind queues;
         channel.queueDeclare("rental_agent_queue", false, false, false, null);
+
         channel.queueBind(uniqueQueueName, "heartbeat_exchange", "");
         channel.queueBind(uniqueQueueName, "building_exchange", "rental_agent_queue");
-        channel.queueBind("rental_agent_queue", "customer_exchange", "rental_agent_queue");
 
-        //Consume both unique and work queue
-        DeliverCallback deliverCallback = (consumerTag, delivery) -> {
-            String message = new String(delivery.getBody(), StandardCharsets.UTF_8);
-            processMessage(message.split("/"), delivery);
-        };
+        // Edge case with new rental agent who got the request before the building was created
+        // Don't bind to customer exchange if no buildings are known
+        scheduler.schedule(this::bindAgentToCustomerQueue, 1, TimeUnit.SECONDS);
 
         channel.basicConsume(uniqueQueueName, true, deliverCallback, consumerTag -> {
         });
+    }
 
-        channel.basicConsume("rental_agent_queue", true, deliverCallback, consumerTag -> {
-        });
+    private void bindAgentToCustomerQueue() {
+        if (!knownBuildings.isEmpty()) {
+            try {
+                channel.exchangeDeclare("customer_exchange", BuiltinExchangeType.DIRECT);
+                channel.queueBind("rental_agent_queue", "customer_exchange", "rental_agent_queue");
+                channel.basicConsume("rental_agent_queue", true, deliverCallback, consumerTag -> {
+                });
+                scheduler.shutdown();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        } else {
+            scheduler.schedule(this::bindAgentToCustomerQueue, 1, TimeUnit.SECONDS);
+        }
     }
 
     private void processMessage(String[] messageParts, Delivery delivery) {
@@ -284,7 +298,7 @@ public class RentalAgent {
         }
     }
 
-    private void processConfirmation(String content, Delivery delivery){
+    private void processConfirmation(String content, Delivery delivery) {
         // Check local reservation list and find the respective building
         // if building exists, forward confirmation to building
         // If building doesn't exist or died in the meantime, respond to customer
@@ -301,13 +315,13 @@ public class RentalAgent {
         // Loop through each building and check each rooms reservation
         // Reservations: {Building_8a18eee0={room_0=Reservation{id='7f065ef1', finalized=false}}}
         boolean found = false;
-        for (String building:reservations.keySet()){
-            if (found){
+        for (String building : reservations.keySet()) {
+            if (found) {
                 break;
             }
 
-            for (String room:reservations.get(building).keySet()){
-                if (reservations.get(building).get(room).getId().equals(reservationId)){
+            for (String room : reservations.get(building).keySet()) {
+                if (reservations.get(building).get(room).getId().equals(reservationId)) {
                     try {
                         AMQP.BasicProperties props = new AMQP.BasicProperties.Builder()
                                 .correlationId(correlationId)
@@ -326,7 +340,7 @@ public class RentalAgent {
             }
         }
 
-        if(!found){
+        if (!found) {
             try {
                 AMQP.BasicProperties props = new AMQP.BasicProperties.Builder()
                         .correlationId(correlationId)
@@ -341,7 +355,7 @@ public class RentalAgent {
         }
     }
 
-    private void finalizeReservation(String content){
+    private void finalizeReservation(String content) {
         // Process finalized reservation
         // Update the reservation status to finalized
         // Respond to the customer with the reservation number
@@ -355,7 +369,7 @@ public class RentalAgent {
                     .correlationId(correlationId)
                     .build();
 
-            String response = message + ": " + reservationId;
+            String response = message + " " + reservationId;
             System.out.println("[x] Responding to customer: " + response);
             channel.basicPublish("", customerQueue, props, response.getBytes(StandardCharsets.UTF_8));
         } catch (IOException e) {
@@ -363,7 +377,7 @@ public class RentalAgent {
         }
     }
 
-    private void processCancellation(String content, Delivery delivery){
+    private void processCancellation(String content, Delivery delivery) {
         // Check if the reservation exists
         // Loop through each building and check each rooms reservation
         // If found forward the cancellation to the building
@@ -375,13 +389,13 @@ public class RentalAgent {
 
         boolean found = false;
 
-        for (String building:reservations.keySet()){
-            if (found){
+        for (String building : reservations.keySet()) {
+            if (found) {
                 break;
             }
 
-            for (String room:reservations.get(building).keySet()){
-                if (reservations.get(building).get(room).getId().equals(reservationId)){
+            for (String room : reservations.get(building).keySet()) {
+                if (reservations.get(building).get(room).getId().equals(reservationId)) {
                     try {
                         AMQP.BasicProperties props = new AMQP.BasicProperties.Builder()
                                 .correlationId(correlationId)
@@ -400,7 +414,7 @@ public class RentalAgent {
             }
         }
 
-        if (!found){
+        if (!found) {
             try {
                 AMQP.BasicProperties props = new AMQP.BasicProperties.Builder()
                         .correlationId(correlationId)
@@ -416,7 +430,7 @@ public class RentalAgent {
 
     }
 
-    private void finalizeCancellation(String content){
+    private void finalizeCancellation(String content) {
         System.out.println("Cancellation: " + content);
 
         String[] parts = content.split(",");
